@@ -1,0 +1,100 @@
+---
+title: "Variable Selection"
+author: "Group 5"
+date: "December 12, 2015"
+output: pdf_document
+---
+
+In order to find the outliers, we will train a model using a section of the dataset that does not include our first 400 observations. We will then fit that model to the dataset we are interested in. This will avoid the 50 outliers from impacting the estimated coefficients in such a way as to mask themselves. We have therefore used observations 401 to 1500 of the synthetic regression data to train a model, which we will test on observations 1 to 400.
+
+We will use a stepwise algorithm in order to find out which of the variables to include in the dataset. The major flaw in this method is that it fails to take into account correlations between the different variables. In order to get around this issue, we create groups of highly correlated variables. Therefore instead of, for instance, making a stepwise choice whether to include variable one, variable two, or variable three, the algorithm chooses whether to include variables one or two *and* three together.
+
+```{r}
+file <- '/home/beeb/Documents/Data_Science/Data/Stat/'
+library(ggplot2)
+library(dplyr)
+setwd(file)
+synth.reg.test <- read.table('synthetic_regression.txt', header = TRUE, nrows= 400)
+synth.reg.train <- read.table('synthetic_regression.txt', header = TRUE, nrows = 1500)
+synth.reg.train <- synth.reg.train[401:1500,]
+```
+
+This section of code identifies the correlated x's:
+
+```{r}
+
+# This bit of code figures out which of the xs need to be put in groups together
+# The first thing we're going to do is see if any of the x's are correlated
+cors <- cor(synth.reg.train[2:ncol(synth.reg.train)])
+m <- ncol(cors)
+
+# Pick out those that have correlation above 0.5
+together <- apply(abs(cors)>0.5, 2, which)
+
+```
+
+We now have a list, 'together', which contains all the variables that should go together. We will scan through this list and see which groups of variables we can add to our current set of variables in order to provide a model with the highest log likelihood.
+
+```{r}
+# Initialise a dataframe for adding variables to and a list to show which groups were added
+currentmod <- data.frame(t = synth.reg.train$t)
+incvars <- list()
+
+# Stepwise!
+# Take the first 50 most important variables (we can examine subsets later on)
+for(k in 1:50) {
+  likelihoods <- sapply(together, function(y) {
+      mod <- cbind(currentmod, select(synth.reg.train, one_of(names(y)))) 
+      model <- lm(t ~ ., data = mod)
+      return(logLik(model))
+  })
+  # Choose the variable which will give the best log likelihood
+  bestvar <- which(likelihoods == max(likelihoods))
+  incvars[[k]] <- bestvar
+  
+  # Move the best variables from the list of vars under consideration to the dataframe of selected variables
+  together <- together[setdiff(1:length(together), bestvar)]
+  currentmod <- cbind(currentmod, select(synth.reg.train, one_of(names(bestvar))))
+}
+
+```
+
+We now have a list of the top 50 groups of variables (59 variables in total) that impact on t. We will now create a series of linear models on the training data, test them on the testing data, and choose a model which provides a high R^2 on the test data.
+
+```{r}
+  # This bit exists due to the complication of needing to treat certain variables in groups
+  # That is, highly correlated variables should go together
+  # 'Steps' will tell us; first take the first three vars; then the next two vars; then
+  # one by itself ; etc etc.
+  steps <- cumsum(sapply(incvars, length))  
+  incvars2 <- unlist(incvars)
+  collect.r2 <- rep(0, length(steps))
+  
+  for(i in steps) {
+    currentmod <- select(synth.reg.train, t, one_of(names(incvars2)[1:i]))
+    model <- lm(t ~ ., data = currentmod)
+    synth.reg.test$predvals <- predict(model, newdata = synth.reg.test)
+    
+    #We collect the R^2 of using the training model on the testing data.
+    # Not sure if there's an automatic way to do this.
+    # Also mark out the points with low likelihood
+    synth.reg.test$residuals <- synth.reg.test$predvals - synth.reg.test$t
+    likelihood <- abs(synth.reg.test$residuals / sd(model$residuals))
+    cutoff <- sd(model$residuals) * 1.96
+    ressumsquare <- sum((synth.reg.test$residuals)**2)
+    totsumsquare <- sum((synth.reg.test$t - mean(synth.reg.test$t))**2)
+    r.squared <- 1 - (ressumsquare/totsumsquare)
+    collect.r2[i] <- r.squared
+    synth.reg.test$cutoff <- 0
+    synth.reg.test$cutoff[abs(synth.reg.test$residuals) > cutoff] <- 1
+    # Now make a beautiful graph out of it
+    plottest <- ggplot(data = synth.reg.test, aes(x = predvals, y = t, colour = cutoff)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1) + 
+    geom_abline(intercept = 1.96 * var(model$residuals), slope = 1) +
+    geom_abline(intercept = -1.96 * var(model$residuals), slope = 1) +      
+    ggtitle(paste('first', i, 'vars,', round(r.squared, 3), sum(synth.reg.test$cutoff)))
+   assign(paste0('plottest', i), plottest)
+
+  }
+  
